@@ -1,1 +1,13 @@
 photo
+temp_dlib
+bridge_server.py
+drone_api.py
+sniff_v2.py 
+sniffer_log.json 
+sniffer_v2_log.json 
+sniffer.py 
+test.py
+alert.mp3 
+requirements.txt
+.venv36
+.venv

@@ -1,0 +1,13 @@
+[console_scripts]
+ges-launch-1.0 = gstreamer_cli.entrypoints:ges_launch_1_0_exe
+gst-device-monitor-1.0 = gstreamer_cli.entrypoints:gst_device_monitor_1_0_exe
+gst-discoverer-1.0 = gstreamer_cli.entrypoints:gst_discoverer_1_0_exe
+gst-dots-viewer = gstreamer_cli.entrypoints:gst_dots_viewer_exe
+gst-inspect-1.0 = gstreamer_cli.entrypoints:gst_inspect_1_0_exe
+gst-launch-1.0 = gstreamer_cli.entrypoints:gst_launch_1_0_exe
+gst-play-1.0 = gstreamer_cli.entrypoints:gst_play_1_0_exe
+gst-typefind-1.0 = gstreamer_cli.entrypoints:gst_typefind_1_0_exe
+gst-validate-1.0 = gstreamer_cli.entrypoints:gst_validate_1_0_exe
+gst-validate-media-check-1.0 = gstreamer_cli.entrypoints:gst_validate_media_check_1_0_exe
+gst-validate-rtsp-server-1.0 = gstreamer_cli.entrypoints:gst_validate_rtsp_server_1_0_exe
+gst-validate-transcoding-1.0 = gstreamer_cli.entrypoints:gst_validate_transcoding_1_0_exe

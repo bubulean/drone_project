@@ -4,15 +4,24 @@ main.py
 -------
 Drone surveillance script with:
   - Continuous live video stream with bounding boxes
-  - Modular detector (swap one import to use a different model)
+  - Modular detector running in a constrained subprocess (simulated drone CPU)
   - Sound alert + GUI pop-up on intruder detection
   - Snapshot saving (every unique face, cooldown per identity)
   - IoT metrics: detection latency, end-to-end latency, FPS,
     detection rate, per-label seen counts, metrics saved to CSV
 
-To switch detector, change the ONE line marked SWAP HERE.
+Responsibility split
+--------------------
+  Actual drone   : flight commands, camera RTP stream, laser firing
+  Simulated drone: face detection + recognition (drone_detection_worker.py,
+                   runs under 128 MB RAM / 15% CPU constraints)
+  Laptop         : GUI display, bounding-box drawing, alerts, metrics
+
+To switch which detector the drone subprocess uses, change the SWAP HERE
+line in drone_detection_worker.py.
 """
 
+import multiprocessing
 import pyhula
 from hula_video import hula_video as HulaVideo
 import time
@@ -26,11 +35,7 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 import pygame
 pygame.mixer.init()
 
-# ── SWAP HERE to use a different model ───────────────────────────────────────
-# from detectors.face_detector import FaceDetector as ActiveDetector
-from detectors.face_recognition_detector import FaceRecognitionDetector as ActiveDetector
-# from detectors.friend_detector import FriendDetector as ActiveDetector
-# ─────────────────────────────────────────────────────────────────────────────
+from detectors.base_detector import Detection
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DRONE_IP         = "192.168.100.87"
@@ -40,6 +45,10 @@ METRICS_LOG      = "metrics.csv"
 ALERT_COOLDOWN   = 5.0    # seconds between repeated ALERTS for same intruder
 SNAPSHOT_COOLDOWN = 10.0  # seconds before re-saving the same face identity
 STREAM_WINDOW    = "Drone Feed"
+FLIGHT_ENABLED   = False   # set to False to skip takeoff/land and just test the camera stream
+VIDEO_SOURCE     = None    # set to a video file path to use a recording instead of the live drone
+                           # e.g. VIDEO_SOURCE = "recordings/recording_20260414_120000.mp4"
+                           # When set: drone connection, flight, and laser are all skipped
 
 # ── Tracking config ───────────────────────────────────────────────────────────
 TRACKING_ENABLED      = False   # set to True to enable follow mode
@@ -293,22 +302,105 @@ def track_target(api, detection, frame_w, frame_h):
         ).start()
 
 
+# ── Bounding-box drawing (LAPTOP side) ───────────────────────────────────────
+
+def draw_detections(frame, detection_dicts):
+    """
+    Draw bounding boxes on frame using detection dicts received from the
+    drone subprocess.  Done on the laptop — not inside the constrained worker.
+
+      orange box : Unknown face
+      red box    : Known intruder
+    """
+    for d in detection_dicts:
+        x1, y1, x2, y2 = d["bbox"]
+        label = d["label"]
+        color = (0, 0, 255) if label != "Unknown" else (0, 165, 255)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.rectangle(frame, (x1, y2 - 28), (x2, y2), color, cv2.FILLED)
+        cv2.putText(frame, label, (x1 + 4, y2 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    return frame
+
+
+# ── Video file source (replaces live drone stream when VIDEO_SOURCE is set) ───
+
+class VideoFileSource(object):
+    """
+    Wraps cv2.VideoCapture to match the get_frame() interface of HulaVideo.
+    Throttles reads to the video's native FPS so timing metrics stay realistic.
+    """
+
+    def __init__(self, path):
+        self._path = path
+        self._cap  = None
+
+    def __enter__(self):
+        self._cap = cv2.VideoCapture(self._path)
+        if not self._cap.isOpened():
+            raise IOError("[VIDEO] Could not open: %s" % self._path)
+        fps = self._cap.get(cv2.CAP_PROP_FPS)
+        self._interval    = 1.0 / (fps if fps > 0 else 25.0)
+        self._last_read   = 0.0
+        self._total       = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print("[VIDEO] Opened %s  (%.1f fps, %d frames)" % (self._path, 1.0 / self._interval, self._total))
+        return self
+
+    def __exit__(self, *_):
+        if self._cap:
+            self._cap.release()
+        print("[VIDEO] Source closed.")
+
+    def get_frame(self, latest=True, block=False):  # noqa: params match HulaVideo interface
+        _, _ = latest, block
+        now = time.time()
+        if now - self._last_read < self._interval:
+            return None          # not time for next frame yet
+        ret, frame = self._cap.read()
+        if not ret:
+            return None          # end of video
+        self._last_read = now
+        return frame
+
+
 # ── Main mission ──────────────────────────────────────────────────────────────
 
-def run_drone_mission(api, detector):
+def run_drone_mission(api, frame_queue, result_queue, detect_proc):
+    """
+    Laptop-side mission loop.
+
+    Parameters
+    ----------
+    api          : pyhula.UserApi  -- drone control (actual hardware)
+    frame_queue  : Queue           -- sends raw frames to drone subprocess
+    result_queue : Queue           -- receives detection results from subprocess
+    detect_proc  : Process         -- handle to the drone subprocess (for liveness check)
+    """
     metrics = Metrics()
 
+    # State carried across frames (non-blocking queue reads return stale data)
+    last_detection_dicts  = []      # list of {"label", "confidence", "bbox"}
+    last_proc_ms          = 0.0     # processing time reported by worker
+    t_frame_captured      = time.time()
+
     # Per-identity cooldown tracking
-    # label -> timestamp of last snapshot save
     last_snapshot_per_label = {}
-    # label -> timestamp of last alert
     last_alert_per_label    = {}
 
-    with HulaVideo(hula_api=api, display=False) as vid:
-        api.single_fly_takeoff({'r':0,'g':255,'b':150,'mode':1})
-        api.single_fly_up(40)
-        time.sleep(0.5)
-        print("[MISSION] Airborne. Press 'q' in the video window to land.")
+    worker_dead_warned = False
+
+    vid_source = VideoFileSource(VIDEO_SOURCE) if VIDEO_SOURCE else HulaVideo(hula_api=api, display=False)
+
+    with vid_source as vid:
+        if VIDEO_SOURCE:
+            print("[MISSION] Video mode: %s -- no flight or laser. Press 'q' to quit." % VIDEO_SOURCE)
+        elif FLIGHT_ENABLED and api is not None:
+            api.single_fly_takeoff({'r':0,'g':255,'b':150,'mode':1})
+            api.single_fly_up(40)
+            time.sleep(0.5)
+            print("[MISSION] Airborne. Press 'q' in the video window to land.")
+        else:
+            print("[MISSION] FLIGHT_ENABLED=False -- skipping takeoff. Press 'q' to quit.")
 
         cv2.namedWindow(STREAM_WINDOW, cv2.WINDOW_NORMAL)
 
@@ -319,39 +411,67 @@ def run_drone_mission(api, detector):
                     print("[MISSION] 'q' pressed -- landing.")
                     break
 
+                # ── Check drone subprocess liveness ───────────────────────────
+                if not detect_proc.is_alive() and not worker_dead_warned:
+                    print("[MISSION] Detection worker died (likely OOM under drone constraints).")
+                    print("[MISSION] Continuing without detection -- showing raw feed.")
+                    worker_dead_warned = True
+
                 frame = vid.get_frame(latest=True, block=False)
                 if frame is None:
                     time.sleep(0.01)
                     continue
 
-                # ── Detection (measure latency) ───────────────────────────────
-                t_frame_captured = time.time()
-                detections, annotated_frame = detector.detect(frame)
-                t_detection_done = time.time()
+                # ── Send frame to simulated drone subprocess ──────────────────
+                # Only copy the frame if the queue actually has space
+                if detect_proc.is_alive() and not frame_queue.full():
+                    try:
+                        frame_queue.put_nowait(frame.copy())
+                        t_frame_captured = time.time()
+                    except Exception:
+                        pass
 
-                detection_latency_ms = (t_detection_done - t_frame_captured) * 1000.0
-                metrics.record_frame(detection_latency_ms, bool(detections))
+                # ── Drain result queue to get the freshest detection ──────────
+                # get_nowait() in a loop discards stale results so we always
+                # display the most recent detection, not one from several frames ago
+                try:
+                    while True:
+                        result = result_queue.get_nowait()
+                        last_detection_dicts = result["detections"]
+                        last_proc_ms         = result["processing_ms"]
+                except Exception:
+                    pass  # queue empty -- last_detection_dicts is now the freshest
+
+                metrics.record_frame(last_proc_ms, bool(last_detection_dicts))
+
+                # ── Laptop draws bounding boxes on the frame ──────────────────
+                annotated_frame = draw_detections(frame.copy(), last_detection_dicts)
 
                 # ── Overlay: FPS + detection count + latency ──────────────────
                 status = "FPS: %.1f  |  Faces: %d  |  Det: %.0f ms" % (
                     metrics.current_fps,
-                    len(detections) if detections else 0,
-                    detection_latency_ms,
+                    len(last_detection_dicts),
+                    last_proc_ms,
                 )
                 cv2.putText(annotated_frame, status, (10, 28),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
 
                 cv2.imshow(STREAM_WINDOW, annotated_frame)
 
-                if not detections:
+                if not last_detection_dicts:
                     continue
 
                 now = time.time()
                 frame_h, frame_w = frame.shape[:2]
 
+                # Convert dicts → Detection objects for tracking + alert logic
+                detections = [
+                    Detection(label=d["label"], confidence=d["confidence"], bbox=d["bbox"])
+                    for d in last_detection_dicts
+                ]
+
                 # ── Tracking ──────────────────────────────────────────────────
-                if TRACKING_ENABLED:
-                    # Only track TARGET_LABEL -- ignore all other detections
+                if TRACKING_ENABLED and api is not None and not VIDEO_SOURCE:
                     target = next(
                         (d for d in detections if d.label == TARGET_LABEL),
                         None
@@ -373,6 +493,7 @@ def run_drone_mission(api, detector):
                         last_snapshot_per_label[label] = now
 
                 # ── Alert only for known intruders (not "Unknown") ────────────
+                # Alert + laser = actual drone/laptop hardware, not constrained
                 intruders = [d for d in detections if d.label != "Unknown"]
                 for det in intruders:
                     label = det.label
@@ -387,22 +508,16 @@ def run_drone_mission(api, detector):
                         threading.Thread(target=play_alert_sound, daemon=True).start()
                         show_popup(label, "")
 
-                        api.plane_fly_generating(0, 3, 3)   # continuous fire
-                        #     time.sleep(1)
-                        #     a.plane_fly_generating(5, 10, 100) # stop
-
-                        # threading.Thread(target=_fire_laser, args=(api,), daemon=True).start
-                        
-                        # api.plane_fly_generating(4, 3, 3)
-                        # time.sleep(1)
-                        # api.plane_fly_generating(5, 10, 100)
+                        if api is not None and not VIDEO_SOURCE:
+                            api.plane_fly_generating(0, 3, 3)   # continuous fire
 
                         print("[ALERT] %s detected! E2E latency: %.0f ms" % (label, e2e_ms))
 
         finally:
             cv2.destroyAllWindows()
-            api.single_fly_touchdown()
-            print("[MISSION] Landed.")
+            if FLIGHT_ENABLED and api is not None and not VIDEO_SOURCE:
+                api.single_fly_touchdown()
+                print("[MISSION] Landed.")
 
             # Print and save metrics
             print(metrics.summary())
@@ -412,28 +527,49 @@ def run_drone_mission(api, detector):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    api = pyhula.UserApi()
+    # Required on Windows so child processes don't re-run this block
+    multiprocessing.freeze_support()
 
-    if not api.connect(DRONE_IP):
-        print("[ERROR] Could not connect to drone at %s" % DRONE_IP)
-        raise SystemExit(1)
+    if VIDEO_SOURCE:
+        print("[MISSION] VIDEO_SOURCE set -- skipping drone connection.")
+        api = None
+    else:
+        api = pyhula.UserApi()
+        if not api.connect(DRONE_IP):
+            print("[ERROR] Could not connect to drone at %s" % DRONE_IP)
+            raise SystemExit(1)
+        print("[OK] Connected to drone at %s" % DRONE_IP)
+        api.single_fly_barrier_aircraft(False)
+        # api.single_fly_lamplight(0, 255, 0, 1, 1) # green light on startup
+        time.sleep(0.5)
 
-    print("[OK] Connected to drone at %s" % DRONE_IP)
+    # ── Start the simulated drone subprocess ──────────────────────────────────
+    # Bounded queues prevent unbounded memory growth if the drone subprocess
+    # is slow (heavy model under constraints):
+    #   frame_queue  maxsize=2  : main loop drops frames rather than queuing them
+    #   result_queue maxsize=10 : worker can buffer a few results
+    from drone_detection_worker import run_detection_worker
 
-    api.single_fly_barrier_aircraft(False)
-    # api.single_fly_lamplight(0, 255, 0, 1, 1) # green light on startup
-    
-    time.sleep(0.5)
-    detector = ActiveDetector(
-        # ── FaceDetector (Haar cascade, detection only) ───────────────────────
-        # scale_factor=1.1,
-        # min_neighbors=5,
-        # min_size=(40, 40),
-        # ── FaceRecognitionDetector (LBPH, knows intruders) ───────────────────
-        known_faces_dir="known_faces",
-        confidence_threshold=95,
-        unknown_alert=True,
-        # ── OnnxDetector ──────────────────────────────────────────────────────
+    frame_queue  = multiprocessing.Queue(maxsize=1)   # depth=1 minimises detection lag
+    result_queue = multiprocessing.Queue(maxsize=10)
+
+    detect_proc = multiprocessing.Process(
+        target=run_detection_worker,
+        args=(frame_queue, result_queue),
+        daemon=True,
+        name="DroneDetectionWorker",
     )
+    detect_proc.start()
+    print("[MISSION] Drone detection subprocess started (PID %d)." % detect_proc.pid)
 
-    run_drone_mission(api, detector)
+    try:
+        run_drone_mission(api, frame_queue, result_queue, detect_proc)
+    finally:
+        # Graceful shutdown: send poison pill then wait briefly
+        try:
+            frame_queue.put_nowait(None)
+        except Exception:
+            pass
+        detect_proc.join(timeout=5)
+        if detect_proc.is_alive():
+            detect_proc.terminate()

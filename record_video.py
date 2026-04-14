@@ -2,23 +2,20 @@
 """
 record_video.py
 ---------------
-Connect to the HULA drone and save a video recording to disk.
-Use the saved file with VIDEO_SOURCE in main.py to run the full
-detection pipeline offline without the drone flying.
+Connect to the HULA drone and save raw frames to a timestamped folder.
+Use frames_to_video.py afterwards to convert them to a video at any FPS.
 
 Usage
 -----
 1. Connect your laptop to the drone's WiFi.
 2. Run:  python record_video.py
-3. Press 'q' in the preview window to stop recording.
-4. Copy the printed filename into main.py:
-
-    VIDEO_SOURCE = "recordings/recording_YYYYMMDD_HHMMSS.mp4"
+3. Press 'q' in the preview window to stop.
+4. Then convert to video:
+       python frames_to_video.py --frames recordings/session_YYYYMMDD_HHMMSS --fps 30
 
 Config
 ------
-Set FLIGHT_ENABLED = True below if you want the drone to take off
-and hover while recording.  Leave it False to record from the ground.
+Set FLIGHT_ENABLED = True to take off before recording.
 """
 
 import pyhula
@@ -31,9 +28,7 @@ from hula_video import hula_video as HulaVideo
 # ── Config ────────────────────────────────────────────────────────────────────
 DRONE_IP       = "192.168.100.87"
 OUTPUT_DIR     = "recordings"
-FLIGHT_ENABLED = False   # set True to take off and hover while recording
-HOVER_HEIGHT   = 40      # cm to climb if FLIGHT_ENABLED
-VIDEO_FPS      = 25.0    # output file frame rate
+FLIGHT_ENABLED = True    # set True to take off and hover while recording
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -47,23 +42,24 @@ def record():
     api.single_fly_barrier_aircraft(False)
     time.sleep(0.5)
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    filename = os.path.join(
-        OUTPUT_DIR,
-        "recording_%s.mp4" % time.strftime("%Y%m%d_%H%M%S"),
-    )
+    # Each session gets its own folder: recordings/session_YYYYMMDD_HHMMSS/
+    session_dir = os.path.join(OUTPUT_DIR, "session_%s" % time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(session_dir, exist_ok=True)
 
-    writer      = None
     frame_count = 0
+    window_sized = False
 
     with HulaVideo(hula_api=api, display=False) as vid:
         if FLIGHT_ENABLED:
+            api.Plane_cmd_switch_QR(0)
             api.single_fly_takeoff({'r': 0, 'g': 255, 'b': 150, 'mode': 1})
-            api.single_fly_up(HOVER_HEIGHT)
+            # api.single_fly_down(10)
             time.sleep(0.5)
-            print("[RECORD] Airborne. Recording started. Press 'q' to stop and land.")
+            print("[RECORD] Airborne. Saving frames to: %s" % session_dir)
+            print("[RECORD] Press 'q' to stop and land.")
         else:
-            print("[RECORD] Recording started (on ground). Press 'q' to stop.")
+            print("[RECORD] Saving frames to: %s" % session_dir)
+            print("[RECORD] Press 'q' to stop.")
 
         cv2.namedWindow("Recording Preview", cv2.WINDOW_NORMAL)
 
@@ -79,17 +75,18 @@ def record():
                     time.sleep(0.01)
                     continue
 
-                # Initialise writer on first frame (so we get the real resolution)
-                if writer is None:
-                    h, w = frame.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    writer = cv2.VideoWriter(filename, fourcc, VIDEO_FPS, (w, h))
-                    print("[RECORD] Writing to: %s  (%dx%d @ %.0f fps)" % (filename, w, h, VIDEO_FPS))
-
-                writer.write(frame)
+                # Save frame as JPEG
+                frame_path = os.path.join(session_dir, "frame_%06d.jpg" % frame_count)
+                cv2.imwrite(frame_path, frame)
                 frame_count += 1
 
-                # Preview with frame counter
+                # Size window to frame on first frame
+                if not window_sized:
+                    h, w = frame.shape[:2]
+                    cv2.resizeWindow("Recording Preview", w, h)
+                    window_sized = True
+
+                # Preview
                 preview = frame.copy()
                 cv2.putText(
                     preview,
@@ -100,22 +97,17 @@ def record():
 
         finally:
             cv2.destroyAllWindows()
-            if writer is not None:
-                writer.release()
-
             if FLIGHT_ENABLED:
                 api.single_fly_touchdown()
                 print("[RECORD] Landed.")
 
     if frame_count > 0:
-        duration = frame_count / VIDEO_FPS
-        print("[RECORD] Saved %d frames (%.1f s) to: %s" % (frame_count, duration, filename))
-        print("[RECORD] To use in main.py, set:")
-        print('         VIDEO_SOURCE = "%s"' % filename.replace("\\", "/"))
+        print("[RECORD] Saved %d frames to: %s" % (frame_count, session_dir))
+        print("[RECORD] To convert to video, run:")
+        print('         python frames_to_video.py --frames "%s" --fps 30' % session_dir.replace("\\", "/"))
     else:
         print("[RECORD] No frames captured.")
-        if os.path.exists(filename):
-            os.remove(filename)
+        os.rmdir(session_dir)
 
 
 if __name__ == "__main__":

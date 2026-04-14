@@ -42,11 +42,12 @@ DRONE_IP         = "192.168.100.87"
 SNAPSHOT_DIR     = "photo"
 DETECTION_LOG    = "detections.txt"
 METRICS_LOG      = "metrics.csv"
+OPERATOR_LOG     = "operator_log.csv"  # live ground truth keylog (see keys below)
 ALERT_COOLDOWN   = 5.0    # seconds between repeated ALERTS for same intruder
 SNAPSHOT_COOLDOWN = 10.0  # seconds before re-saving the same face identity
 STREAM_WINDOW    = "Drone Feed"
 FLIGHT_ENABLED   = False   # set to False to skip takeoff/land and just test the camera stream
-VIDEO_SOURCE     = None    # set to a video file path to use a recording instead of the live drone
+VIDEO_SOURCE     = "recordings/testVid1.mp4"    # set to a video file path to use a recording instead of the live drone
                            # e.g. VIDEO_SOURCE = "recordings/recording_20260414_120000.mp4"
                            # When set: drone connection, flight, and laser are all skipped
 
@@ -73,20 +74,38 @@ class Metrics(object):
         self.session_start     = time.time()
         self.frames_processed  = 0
         self.frames_with_face  = 0
-        self.detection_latencies   = []   # ms: frame captured -> detection done
+        self.detection_latencies   = []   # ms total per frame (all frames)
         self.end_to_end_latencies  = []   # ms: frame captured -> alert fired
+        # Stage latencies — only recorded on frames where a face was detected,
+        # so min/max reflect real inference times, not zero-latency empty frames.
+        self.det_latencies         = []   # ms: Haar detection stage (face-present frames)
+        self.recog_latencies       = []   # ms: MobileFaceNet stage  (face-present frames)
         self.alert_count       = 0
         self.label_counts      = {}       # label -> how many times seen
         self._last_fps_time    = time.time()
         self._fps_frame_count  = 0
         self.current_fps       = 0.0
+        # Per-frame log: each entry is a dict written to the per-frame CSV at save time
+        self._frame_log        = []
 
-    def record_frame(self, detection_latency_ms, had_detection):
+    def record_frame(self, detection_latency_ms, had_detection, det_ms=0.0, recog_ms=0.0):
         self.frames_processed += 1
         self._fps_frame_count += 1
+        elapsed = time.time() - self.session_start
         self.detection_latencies.append(detection_latency_ms)
         if had_detection:
             self.frames_with_face += 1
+            # Only log stage times when a face was actually processed
+            self.det_latencies.append(det_ms)
+            self.recog_latencies.append(recog_ms)
+        self._frame_log.append({
+            "frame":        self.frames_processed,
+            "elapsed_s":    round(elapsed, 3),
+            "total_ms":     round(detection_latency_ms, 2),
+            "det_ms":       round(det_ms, 2),
+            "recog_ms":     round(recog_ms, 2),
+            "had_face":     int(had_detection),
+        })
 
         # Update FPS every second
         now = time.time()
@@ -125,6 +144,16 @@ class Metrics(object):
                 min(det_lats) if det_lats else 0,
                 max(det_lats) if det_lats else 0,
             ),
+            "  UltraFace stage     : avg=%.1f ms  min=%.1f ms  max=%.1f ms  (face-present frames only)" % (
+                sum(self.det_latencies) / max(len(self.det_latencies), 1),
+                min(self.det_latencies)   if self.det_latencies   else 0,
+                max(self.det_latencies)   if self.det_latencies   else 0,
+            ),
+            "  MobileFaceNet stage : avg=%.1f ms  min=%.1f ms  max=%.1f ms  (face-present frames only)" % (
+                sum(self.recog_latencies) / max(len(self.recog_latencies), 1),
+                min(self.recog_latencies) if self.recog_latencies else 0,
+                max(self.recog_latencies) if self.recog_latencies else 0,
+            ),
             "End-to-end latency    : avg=%.1f ms  min=%.1f ms  max=%.1f ms" % (
                 sum(e2e_lats) / max(len(e2e_lats), 1),
                 min(e2e_lats) if e2e_lats else 0,
@@ -142,23 +171,31 @@ class Metrics(object):
 
     def save_csv(self, path):
         elapsed = time.time() - self.session_start
-        det_lats = self.detection_latencies
-        e2e_lats = self.end_to_end_latencies
+        det_lats   = self.detection_latencies
+        e2e_lats   = self.end_to_end_latencies
+        det_stage  = self.det_latencies
+        recog_stage = self.recog_latencies
         row = {
-            "timestamp":            time.strftime("%Y-%m-%d %H:%M:%S"),
-            "session_duration_s":   round(elapsed, 2),
-            "frames_processed":     self.frames_processed,
-            "avg_fps":              round(self.frames_processed / max(elapsed, 1), 2),
-            "frames_with_face":     self.frames_with_face,
-            "detection_rate_pct":   round(100.0 * self.frames_with_face / max(self.frames_processed, 1), 2),
-            "det_latency_avg_ms":   round(sum(det_lats) / max(len(det_lats), 1), 2),
-            "det_latency_min_ms":   round(min(det_lats) if det_lats else 0, 2),
-            "det_latency_max_ms":   round(max(det_lats) if det_lats else 0, 2),
-            "e2e_latency_avg_ms":   round(sum(e2e_lats) / max(len(e2e_lats), 1), 2),
-            "e2e_latency_min_ms":   round(min(e2e_lats) if e2e_lats else 0, 2),
-            "e2e_latency_max_ms":   round(max(e2e_lats) if e2e_lats else 0, 2),
-            "alerts_fired":         self.alert_count,
-            "identities_seen":      str(self.label_counts),
+            "timestamp":              time.strftime("%Y-%m-%d %H:%M:%S"),
+            "session_duration_s":     round(elapsed, 2),
+            "frames_processed":       self.frames_processed,
+            "avg_fps":                round(self.frames_processed / max(elapsed, 1), 2),
+            "frames_with_face":       self.frames_with_face,
+            "detection_rate_pct":     round(100.0 * self.frames_with_face / max(self.frames_processed, 1), 2),
+            "det_latency_avg_ms":     round(sum(det_lats) / max(len(det_lats), 1), 2),
+            "det_latency_min_ms":     round(min(det_lats) if det_lats else 0, 2),
+            "det_latency_max_ms":     round(max(det_lats) if det_lats else 0, 2),
+            "ultraface_avg_ms":       round(sum(det_stage) / max(len(det_stage), 1), 2),
+            "ultraface_min_ms":       round(min(det_stage)   if det_stage   else 0, 2),
+            "ultraface_max_ms":       round(max(det_stage)   if det_stage   else 0, 2),
+            "mobilefacenet_avg_ms":   round(sum(recog_stage) / max(len(recog_stage), 1), 2),
+            "mobilefacenet_min_ms":   round(min(recog_stage) if recog_stage else 0, 2),
+            "mobilefacenet_max_ms":   round(max(recog_stage) if recog_stage else 0, 2),
+            "e2e_latency_avg_ms":     round(sum(e2e_lats) / max(len(e2e_lats), 1), 2),
+            "e2e_latency_min_ms":     round(min(e2e_lats) if e2e_lats else 0, 2),
+            "e2e_latency_max_ms":     round(max(e2e_lats) if e2e_lats else 0, 2),
+            "alerts_fired":           self.alert_count,
+            "identities_seen":        str(self.label_counts),
         }
         write_header = not os.path.exists(path)
         with open(path, "a", newline="") as f:
@@ -166,7 +203,16 @@ class Metrics(object):
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
-        print("[METRICS] Saved to %s" % path)
+        print("[METRICS] Saved session summary to %s" % path)
+
+        # Write per-frame log (one row per frame, new file each session)
+        if self._frame_log:
+            frame_path = path.replace(".csv", "_frames_%s.csv" % time.strftime("%Y%m%d_%H%M%S"))
+            with open(frame_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(self._frame_log[0].keys()))
+                writer.writeheader()
+                writer.writerows(self._frame_log)
+            print("[METRICS] Saved per-frame log  to %s (%d frames)" % (frame_path, len(self._frame_log)))
 
 
 # ── Alert helpers ─────────────────────────────────────────────────────────────
@@ -306,8 +352,7 @@ def track_target(api, detection, frame_w, frame_h):
 
 def draw_detections(frame, detection_dicts):
     """
-    Draw bounding boxes on frame using detection dicts received from the
-    drone subprocess.  Done on the laptop — not inside the constrained worker.
+    Draw bounding boxes on frame.
 
       orange box : Unknown face
       red box    : Known intruder
@@ -379,8 +424,10 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
     metrics = Metrics()
 
     # State carried across frames (non-blocking queue reads return stale data)
-    last_detection_dicts  = []      # list of {"label", "confidence", "bbox"}
-    last_proc_ms          = 0.0     # processing time reported by worker
+    last_detection_dicts  = []      # list of {"label", "confidence", "bbox"} from worker
+    last_proc_ms          = 0.0     # total processing time reported by worker
+    last_det_ms           = 0.0     # detection stage latency
+    last_recog_ms         = 0.0     # recognition stage latency
     t_frame_captured      = time.time()
 
     # Per-identity cooldown tracking
@@ -404,12 +451,36 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
 
         cv2.namedWindow(STREAM_WINDOW, cv2.WINDOW_NORMAL)
 
+        # ── Operator keylog setup ─────────────────────────────────────────────
+        # During live testing, press keys to mark ground truth in real time:
+        #   i  = intruder just entered frame
+        #   o  = intruder just left frame  (o for "out")
+        #   u  = only unknown/non-intruder people visible
+        #   n  = no one in frame
+        # These timestamps are saved to operator_log.csv and compared against
+        # metrics.csv after the session to compute live precision/recall.
+        op_log_rows   = []
+        op_state      = "n"    # current operator-marked ground truth state
+        print("[MISSION] Operator keys: i=intruder in frame  o=intruder left  u=unknown only  n=empty")
+
         try:
             while True:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     print("[MISSION] 'q' pressed -- landing.")
                     break
+
+                # ── Operator ground truth keylog ──────────────────────────────
+                if key in (ord("i"), ord("o"), ord("u"), ord("n")):
+                    op_state = chr(key)
+                    label_map = {"i": "intruder", "o": "intruder_left",
+                                 "u": "unknown_only", "n": "empty"}
+                    op_log_rows.append({
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "elapsed_s": round(time.time() - metrics.session_start, 2),
+                        "state":     label_map[op_state],
+                    })
+                    print("[OPERATOR] Marked: %s" % label_map[op_state])
 
                 # ── Check drone subprocess liveness ───────────────────────────
                 if not detect_proc.is_alive() and not worker_dead_warned:
@@ -423,7 +494,6 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                     continue
 
                 # ── Send frame to simulated drone subprocess ──────────────────
-                # Only copy the frame if the queue actually has space
                 if detect_proc.is_alive() and not frame_queue.full():
                     try:
                         frame_queue.put_nowait(frame.copy())
@@ -432,25 +502,27 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                         pass
 
                 # ── Drain result queue to get the freshest detection ──────────
-                # get_nowait() in a loop discards stale results so we always
-                # display the most recent detection, not one from several frames ago
                 try:
                     while True:
                         result = result_queue.get_nowait()
                         last_detection_dicts = result["detections"]
                         last_proc_ms         = result["processing_ms"]
+                        last_det_ms          = result.get("det_ms",   0.0)
+                        last_recog_ms        = result.get("recog_ms", 0.0)
                 except Exception:
-                    pass  # queue empty -- last_detection_dicts is now the freshest
+                    pass
 
-                metrics.record_frame(last_proc_ms, bool(last_detection_dicts))
+                metrics.record_frame(last_proc_ms, bool(last_detection_dicts),
+                                     det_ms=last_det_ms, recog_ms=last_recog_ms)
 
-                # ── Laptop draws bounding boxes on the frame ──────────────────
                 annotated_frame = draw_detections(frame.copy(), last_detection_dicts)
 
-                # ── Overlay: FPS + detection count + latency ──────────────────
-                status = "FPS: %.1f  |  Faces: %d  |  Det: %.0f ms" % (
+                # ── Overlay: FPS + per-stage latency ──────────────────────────
+                status = "FPS: %.1f  |  Faces: %d  |  Detect: %.0f ms  Recog: %.0f ms  Total: %.0f ms" % (
                     metrics.current_fps,
                     len(last_detection_dicts),
+                    last_det_ms,
+                    last_recog_ms,
                     last_proc_ms,
                 )
                 cv2.putText(annotated_frame, status, (10, 28),
@@ -485,7 +557,6 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                     label = det.label
                     metrics.record_face_seen(label)
 
-                    # ── Save snapshot (per-identity cooldown) ─────────────────
                     last_snap = last_snapshot_per_label.get(label, 0)
                     if now - last_snap >= SNAPSHOT_COOLDOWN:
                         snap_path = save_snapshot(annotated_frame, label)
@@ -493,7 +564,6 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                         last_snapshot_per_label[label] = now
 
                 # ── Alert only for known intruders (not "Unknown") ────────────
-                # Alert + laser = actual drone/laptop hardware, not constrained
                 intruders = [d for d in detections if d.label != "Unknown"]
                 for det in intruders:
                     label = det.label
@@ -501,7 +571,6 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                     if now - last_alert >= ALERT_COOLDOWN:
                         last_alert_per_label[label] = now
 
-                        # End-to-end latency = time from frame capture to alert
                         e2e_ms = (time.time() - t_frame_captured) * 1000.0
                         metrics.record_alert(label, e2e_ms)
 
@@ -509,7 +578,7 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                         show_popup(label, "")
 
                         if api is not None and not VIDEO_SOURCE:
-                            api.plane_fly_generating(0, 3, 3)   # continuous fire
+                            api.plane_fly_generating(0, 3, 3)
 
                         print("[ALERT] %s detected! E2E latency: %.0f ms" % (label, e2e_ms))
 
@@ -522,6 +591,16 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
             # Print and save metrics
             print(metrics.summary())
             metrics.save_csv(METRICS_LOG)
+
+            # Save operator keylog if any keys were pressed
+            if op_log_rows:
+                write_header = not os.path.exists(OPERATOR_LOG)
+                with open(OPERATOR_LOG, "a", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=["timestamp", "elapsed_s", "state"])
+                    if write_header:
+                        writer.writeheader()
+                    writer.writerows(op_log_rows)
+                print("[OPERATOR] Ground truth log saved to %s" % OPERATOR_LOG)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -86,9 +86,12 @@ class TinyFaceDetector(BaseDetector):
 
         # Single-threaded SessionOptions — prevents internal thread-pool contention
         # when the process is pinned to a single core under drone constraints.
+        # log_severity_level=3 suppresses the flood of "initializer in graph inputs"
+        # warnings emitted by the UltraFace model on load (harmless export quirk).
         so = self._ort.SessionOptions()
         so.intra_op_num_threads = 1
         so.inter_op_num_threads = 1
+        so.log_severity_level   = 3   # 0=VERBOSE 1=INFO 2=WARNING 3=ERROR only
 
         # ── Face detector: UltraFace via onnxruntime ──────────────────────────
         if not os.path.isfile(self.face_det_path):
@@ -99,9 +102,10 @@ class TinyFaceDetector(BaseDetector):
                 "/raw/master/models/onnx/version-RFB-320.onnx\n"
                 "  Save as models/ultraface.onnx" % self.face_det_path
             )
-        self._det_session    = self._ort.InferenceSession(self.face_det_path, sess_options=so)
+        self._det_session    = self._ort.InferenceSession(
+            self.face_det_path, sess_options=so, providers=["CPUExecutionProvider"])
         self._det_input_name = self._det_session.get_inputs()[0].name
-        print("[TinyFaceDetector] Loaded UltraFace from %s (single-threaded)" % self.face_det_path)
+        print("[TinyFaceDetector] Loaded UltraFace from %s (CPU, single-threaded)" % self.face_det_path)
 
         # ── Face embedder: MobileFaceNet via onnxruntime ──────────────────────
         if not os.path.isfile(self.model_path):
@@ -112,9 +116,10 @@ class TinyFaceDetector(BaseDetector):
                 "  Then run: python quantize_model.py  (for INT8 version)"
                 % self.model_path
             )
-        self._session    = self._ort.InferenceSession(self.model_path, sess_options=so)
+        self._session    = self._ort.InferenceSession(
+            self.model_path, sess_options=so, providers=["CPUExecutionProvider"])
         self._input_name = self._session.get_inputs()[0].name
-        print("[TinyFaceDetector] Loaded MobileFaceNet from %s (single-threaded)" % self.model_path)
+        print("[TinyFaceDetector] Loaded MobileFaceNet from %s (CPU, single-threaded)" % self.model_path)
 
         # ── Known-face embedding cache ────────────────────────────────────────
         self._known_embeddings = None

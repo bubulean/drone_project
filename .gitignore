@@ -12,3 +12,4 @@ requirements.txt
 .venv36
 .venv
 recordings
+finetune

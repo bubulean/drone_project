@@ -39,7 +39,23 @@ import traceback
 APPLY_CONSTRAINTS = True   # True = CPU throttle + RAM measurement; False = full speed
 
 DRONE_RAM_MB      = 128     # HULA drone physical RAM cap  (reporting threshold)
-SIM_CPU_FRACTION  = 0.15    # 15% of one core ≈ ARM ~400 MHz
+
+# CPU throttle: we simulate DRONE_CPU_MHZ by giving the subprocess that fraction
+# of one laptop core.
+#
+#   Ryzen 7 5800U single-core boost ≈ 4400 MHz  (base ~1900 MHz, but under
+#   single-core load it boosts; 4400 is the practical ceiling)
+#
+#   fraction = DRONE_CPU_MHZ / LAPTOP_CORE_MHZ
+#
+# NOTE: this is a frequency-proportional approximation.  x86-64 IPC is higher
+# than ARM at the same MHz, so the laptop will be slightly *faster* than the
+# real drone even at this fraction.  The number is still useful for ballpark
+# latency estimates.
+DRONE_CPU_MHZ    = 400      # HULA drone ARM processor target
+LAPTOP_CORE_MHZ  = 4400     # Ryzen 7 5800U single-core boost
+
+SIM_CPU_FRACTION = DRONE_CPU_MHZ / LAPTOP_CORE_MHZ   # ≈ 0.091  (~9%)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -75,20 +91,33 @@ def _apply_cpu_only():
         print("[DRONE SIM] CPU throttle disabled (fraction=100%%)")
         return
 
+    # How it works:
+    #   Both the throttle thread and the inference thread are pinned to core 0.
+    #   The throttle thread BUSY-LOOPS (spins) for (1 - fraction) of each interval,
+    #   stealing the core from the inference thread.  It then sleeps for the remaining
+    #   fraction, giving the core back to inference.
+    #   Net result: inference gets ~SIM_CPU_FRACTION of one core.
+    #
+    #   IMPORTANT: time.sleep() gives the CPU away — it must NOT be used during the
+    #   steal phase.  Only a spin loop actually occupies the core.
     interval_s  = 0.05
-    active_time = interval_s * SIM_CPU_FRACTION
-    sleep_time  = interval_s * (1.0 - SIM_CPU_FRACTION)
+    steal_time  = interval_s * (1.0 - SIM_CPU_FRACTION)   # spin: take core away
+    give_time   = interval_s * SIM_CPU_FRACTION            # sleep: give core back
 
     def _throttle():
         while True:
-            time.sleep(active_time)
-            time.sleep(sleep_time)
+            # Busy-spin to steal the core from the inference thread
+            deadline = time.time() + steal_time
+            while time.time() < deadline:
+                pass
+            # Sleep to yield the core back
+            time.sleep(give_time)
 
     t = threading.Thread(target=_throttle, daemon=True)
     try:
         t.start()
-        print("[DRONE SIM] CPU throttled to %.0f%% of one core (~400 MHz equivalent)"
-              % (SIM_CPU_FRACTION * 100))
+        print("[DRONE SIM] CPU throttled to %.1f%% of one core  (%d MHz / %d MHz)"
+              % (SIM_CPU_FRACTION * 100, DRONE_CPU_MHZ, LAPTOP_CORE_MHZ))
     except RuntimeError as e:
         print("[DRONE SIM] WARNING: Could not start CPU throttle thread: %s" % e)
 
@@ -105,7 +134,8 @@ def run_detection_worker(frame_queue, result_queue):
             print("  DRONE SIMULATION (measurement mode)")
             print("=" * 52)
             print("  RAM threshold : %d MB  (HULA drone spec)" % DRONE_RAM_MB)
-            print("  CPU target    : %.0f%% of one core (~400 MHz)" % (SIM_CPU_FRACTION * 100))
+            print("  CPU target    : %d MHz drone  /  %d MHz laptop  =  %.1f%% of one core"
+                  % (DRONE_CPU_MHZ, LAPTOP_CORE_MHZ, SIM_CPU_FRACTION * 100))
             print("  Method        : measure peak physical RSS")
             print("=" * 52 + "\n")
             _apply_cpu_only()

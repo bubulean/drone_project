@@ -47,7 +47,7 @@ ALERT_COOLDOWN   = 5.0    # seconds between repeated ALERTS for same intruder
 SNAPSHOT_COOLDOWN = 10.0  # seconds before re-saving the same face identity
 STREAM_WINDOW    = "Drone Feed"
 FLIGHT_ENABLED   = False   # set to False to skip takeoff/land and just test the camera stream
-VIDEO_SOURCE     = "recordings/testVid1.mp4"    # set to a video file path to use a recording instead of the live drone
+VIDEO_SOURCE     = "recordings/testVid1.mp4"    #  None  set to a video file path to use a recording instead of the live drone
                            # e.g. VIDEO_SOURCE = "recordings/recording_20260414_120000.mp4"
                            # When set: drone connection, flight, and laser are all skipped
 

@@ -36,9 +36,9 @@ import traceback
 
 
 # ── Constraint / benchmark settings ──────────────────────────────────────────
-APPLY_CONSTRAINTS = True   # True = CPU throttle + RAM measurement; False = full speed
+APPLY_CONSTRAINTS = True  # True = CPU throttle + RAM measurement; False = full speed
 
-DRONE_RAM_MB      = 128     # HULA drone physical RAM cap  (reporting threshold)
+DRONE_RAM_MB      = 512     # HULA drone physical RAM cap  (reporting threshold)
 
 # CPU throttle: we simulate DRONE_CPU_MHZ by giving the subprocess that fraction
 # of one laptop core.
@@ -64,8 +64,8 @@ SIM_CPU_FRACTION = DRONE_CPU_MHZ / LAPTOP_CORE_MHZ   # ≈ 0.091  (~9%)
 from detectors.tiny_face_detector import TinyFaceDetector as ActiveDetector
 
 # Update this when you swap above. Used for metrics filename + per-row tagging.
-RECOGNIZER_NAME = "MobileFaceNet"      # TinyFaceDetector  = UltraFace + MobileFaceNet INT8
-# RECOGNIZER_NAME = "ArcFace-R50"      # ArcFaceDetector  = MTCNN + ArcFace-R50 head
+# RECOGNIZER_NAME = "MobileFaceNet"      # TinyFaceDetector  = UltraFace + MobileFaceNet INT8
+RECOGNIZER_NAME = "ArcFace-R50"      # ArcFaceDetector  = MTCNN + ArcFace-R50 head
 # RECOGNIZER_NAME = "ArcFace-R18"      # ArcFaceDetector  with R18 weights
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -150,15 +150,16 @@ def run_detection_worker(frame_queue, result_queue):
         # ── Load detector ─────────────────────────────────────────────────────
         print("[DRONE WORKER] Loading detector...")
         detector = ActiveDetector(
-            # ── TinyFaceDetector (UltraFace detection + MobileFaceNet INT8) ──
+            # ── TinyFaceDetector (UltraFace detection + MobileFaceNet) ──
+            # known_faces_dir="known_faces",
+            # model_path="models/mobilefacenet.onnx", 
+            # face_det_path="models/ultraface.onnx",
+            # similarity_threshold=0.3,
+            # ── ArcFaceDetector (MTCNN + InceptionResnetV1, heavy) ────────────
             known_faces_dir="known_faces",
-            model_path="models/mobilefacenet.onnx", 
+            model_path="models/w600k_r50.onnx", 
             face_det_path="models/ultraface.onnx",
             similarity_threshold=0.3,
-            # ── ArcFaceDetector (MTCNN + InceptionResnetV1, heavy) ────────────
-            # known_faces_dir="known_faces",
-            # model_path="best_model.pth",
-            # similarity_threshold=0.45,
         )
 
         rss_after_load = _peak_rss_mb()
@@ -172,6 +173,9 @@ def run_detection_worker(frame_queue, result_queue):
             else:
                 print("[DRONE SIM] Model fits (%.1f MB used of %d MB cap)"
                       % (rss_after_load, DRONE_RAM_MB))
+
+        # Signal main process that we're ready to accept frames
+        result_queue.put({"ready": True, "rss_mb": rss_after_load})
 
         peak_rss = rss_after_load
 

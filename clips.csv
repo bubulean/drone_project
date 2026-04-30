@@ -7,12 +7,12 @@ marshall_overhead40,marshall,no,steep overhead angle,unknown,overhead,40-deg til
 marshall_overhead4020,marshall,no,steep overhead angle,unknown,overhead,40-20 config
 marshall_overhead4040,marshall,no,steep overhead angle,unknown,overhead,40-40 config
 marshall_side40,marshall,no,steep side angle,unknown,side,40-deg side
-mike_lowcontrast,mike,no,low contrast,unknown,frontal,
+mike_lowcontrst,mike,no,low contrast,unknown,frontal,
 mike_neardark,mike,no,near-dark,unknown,frontal,
 mike_sidesun,mike,no,harsh side sun,unknown,frontal,
 mike_sunabove,mike,no,harsh overhead sun,unknown,frontal,
 rohan_extremesidelight,rohan,no,extreme side lighting,unknown,side,b&w footage
-rohan_lowcontrast,rohan,no,low contrast,unknown,frontal,b&w footage
+rohan_lowcontrst,rohan,no,low contrast,unknown,frontal,b&w footage
 rohan_neardark,rohan,no,near-dark,unknown,frontal,b&w footage
 rohan_sunabove,rohan,no,harsh overhead sun,unknown,frontal,b&w footage
 rohan_sunside,rohan,no,harsh side sun,unknown,side,b&w footage

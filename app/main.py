@@ -33,6 +33,7 @@ import pyhula
 from app.hula_video import hula_video as HulaVideo
 from app.drone_detection_worker import RECOGNIZER_NAME
 import time
+import queue
 import cv2
 import csv
 import threading
@@ -54,7 +55,7 @@ ALERT_COOLDOWN   = 5.0    # seconds between repeated ALERTS for same intruder
 SNAPSHOT_COOLDOWN = 10.0  # seconds before re-saving the same face identity
 STREAM_WINDOW    = "Drone Feed"
 FLIGHT_ENABLED   = False   # set to False to skip takeoff/land and just test the camera stream
-VIDEO_SOURCE     = "recordings/buthaina_2m.mp4" #"recordings/testVid1.mp4"    #  None  set to a video file path to use a recording instead of the live drone
+VIDEO_SOURCE     = "recordings/rohan_sunside.mp4" #"recordings/testVid1.mp4"    #  None  set to a video file path to use a recording instead of the live drone
                            # e.g. VIDEO_SOURCE = "recordings/recording_20260414_120000.mp4"
                            # When set: drone connection, flight, and lasezr are all skipped
 
@@ -661,6 +662,26 @@ if __name__ == "__main__":
     )
     detect_proc.start()
     print("[MISSION] Drone detection subprocess started (PID %d)." % detect_proc.pid)
+
+    # ── Wait for the worker to finish loading models before opening the stream ──
+    # The worker sends a {"ready": True} sentinel on result_queue once its
+    # detector is loaded. Block here so the GUI window, frame reads, and metrics
+    # clock don't start until inference is actually possible. If the worker dies
+    # during load (OOM, missing model file, etc.) we fall through and let the
+    # mission loop run in the existing "worker dead -- raw feed" mode.
+    print("[MISSION] Waiting for detector to load...")
+    while True:
+        try:
+            ready_msg = result_queue.get(timeout=1.0)
+            if isinstance(ready_msg, dict) and ready_msg.get("ready"):
+                print("[MISSION] Detector ready (RSS %.1f MB)."
+                      % ready_msg.get("rss_mb", 0.0))
+                break
+        except queue.Empty:
+            if not detect_proc.is_alive():
+                print("[MISSION] Detection worker died before becoming ready -- "
+                      "continuing without detection.")
+                break
 
     try:
         run_drone_mission(api, frame_queue, result_queue, detect_proc)

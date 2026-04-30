@@ -27,3 +27,7 @@ operator_log.csv
 models/tiny_known_embeddings.npy
 models/tiny_known_labels.npy
 models/*.zip
+
+# Off-drone reference model: too large for GitHub (>100 MB).
+# Download from https://github.com/deepinsight/insightface/releases (buffalo_l).
+models/w600k_r50.onnx

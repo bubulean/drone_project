@@ -44,7 +44,7 @@ import cv2
 
 # ── Config ────────────────────────────────────────────────────────────────────
 KNOWN_FACES_DIR      = "known_faces"
-MODEL_PATH           = "best_model.pth"
+MODEL_PATH           = "models/best_model.pth"
 SIMILARITY_THRESHOLD = 0.45
 RESULTS_CSV          = "evaluation_results.csv"
 # ─────────────────────────────────────────────────────────────────────────────

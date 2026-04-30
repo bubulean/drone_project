@@ -18,12 +18,17 @@ Config
 Set FLIGHT_ENABLED = True to take off before recording.
 """
 
+import os
+import sys
+# Allow `python app/record_video.py` as well as `python -m app.record_video`.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pyhula
 import cv2
-import os
 import time
 
-from hula_video import hula_video as HulaVideo
+from app.hula_video import hula_video as HulaVideo
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DRONE_IP       = "192.168.100.87"
@@ -53,7 +58,7 @@ def record():
         if FLIGHT_ENABLED:
             api.Plane_cmd_switch_QR(0)
             api.single_fly_takeoff({'r': 0, 'g': 255, 'b': 150, 'mode': 1})
-            # api.single_fly_down(10)
+            api.single_fly_up(50)
             time.sleep(0.5)
             print("[RECORD] Airborne. Saving frames to: %s" % session_dir)
             print("[RECORD] Press 'q' to stop and land.")

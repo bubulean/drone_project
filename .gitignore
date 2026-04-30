@@ -13,3 +13,17 @@ requirements.txt
 .venv
 recordings
 finetune
+
+# Build artifacts / temp
+__pycache__/
+tmp.sdp
+
+# Runtime logs and outputs
+detections.txt
+metrics.csv
+operator_log.csv
+
+# Regenerable model caches / packaging artifacts
+models/tiny_known_embeddings.npy
+models/tiny_known_labels.npy
+models/*.zip

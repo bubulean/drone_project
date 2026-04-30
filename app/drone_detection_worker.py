@@ -62,6 +62,11 @@ SIM_CPU_FRACTION = DRONE_CPU_MHZ / LAPTOP_CORE_MHZ   # ≈ 0.091  (~9%)
 # ── SWAP HERE to test a different detector ────────────────────────────────────
 # from detectors.arcface_detector import ArcFaceDetector as ActiveDetector
 from detectors.tiny_face_detector import TinyFaceDetector as ActiveDetector
+
+# Update this when you swap above. Used for metrics filename + per-row tagging.
+RECOGNIZER_NAME = "MobileFaceNet"      # TinyFaceDetector  = UltraFace + MobileFaceNet INT8
+# RECOGNIZER_NAME = "ArcFace-R50"      # ArcFaceDetector  = MTCNN + ArcFace-R50 head
+# RECOGNIZER_NAME = "ArcFace-R18"      # ArcFaceDetector  with R18 weights
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -147,7 +152,7 @@ def run_detection_worker(frame_queue, result_queue):
         detector = ActiveDetector(
             # ── TinyFaceDetector (UltraFace detection + MobileFaceNet INT8) ──
             known_faces_dir="known_faces",
-            model_path="models/mobilefacenet_int8.onnx",  # run quantize_model.py first
+            model_path="models/mobilefacenet.onnx", 
             face_det_path="models/ultraface.onnx",
             similarity_threshold=0.3,
             # ── ArcFaceDetector (MTCNN + InceptionResnetV1, heavy) ────────────

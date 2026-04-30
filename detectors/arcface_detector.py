@@ -21,7 +21,7 @@ USAGE IN main.py / drone_detection_worker.py
 
     detector = ArcFaceDetector(
         known_faces_dir="known_faces",   # folder of intruder photos
-        model_path="best_model.pth",     # Embeddinghead weights
+        model_path="models/best_model.pth",  # Embeddinghead weights
         similarity_threshold=0.45,       # cosine sim cutoff (0-1)
     )
 
@@ -55,7 +55,7 @@ class ArcFaceDetector(BaseDetector):
     kwargs
     ------
     known_faces_dir      : str   -- folder of intruder photos  (default "known_faces")
-    model_path           : str   -- path to best_model.pth     (default "best_model.pth")
+    model_path           : str   -- path to best_model.pth     (default "models/best_model.pth")
     similarity_threshold : float -- cosine similarity cutoff   (default 0.45)
     cache_dir            : str   -- where to save/load .npy cache (default same as model_path dir)
     """
@@ -68,7 +68,7 @@ class ArcFaceDetector(BaseDetector):
             )
 
         self.known_faces_dir      = self.kwargs.get("known_faces_dir", "known_faces")
-        self.model_path           = self.kwargs.get("model_path", "best_model.pth")
+        self.model_path           = self.kwargs.get("model_path", "models/best_model.pth")
         self.similarity_threshold = self.kwargs.get("similarity_threshold", 0.45)
 
         model_dir = os.path.dirname(os.path.abspath(self.model_path)) if self.model_path else "."

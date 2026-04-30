@@ -21,12 +21,19 @@ To switch which detector the drone subprocess uses, change the SWAP HERE
 line in drone_detection_worker.py.
 """
 
+import os
+import sys
+# Allow `python app/main.py` as well as `python -m app.main`: ensure the project
+# root is on sys.path so the `app.*` imports below resolve either way.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import multiprocessing
 import pyhula
-from hula_video import hula_video as HulaVideo
+from app.hula_video import hula_video as HulaVideo
+from app.drone_detection_worker import RECOGNIZER_NAME
 import time
 import cv2
-import os
 import csv
 import threading
 import tkinter as tk
@@ -47,9 +54,9 @@ ALERT_COOLDOWN   = 5.0    # seconds between repeated ALERTS for same intruder
 SNAPSHOT_COOLDOWN = 10.0  # seconds before re-saving the same face identity
 STREAM_WINDOW    = "Drone Feed"
 FLIGHT_ENABLED   = False   # set to False to skip takeoff/land and just test the camera stream
-VIDEO_SOURCE     = "recordings/testVid1.mp4"    #  None  set to a video file path to use a recording instead of the live drone
+VIDEO_SOURCE     = "recordings/buthaina_2m.mp4" #"recordings/testVid1.mp4"    #  None  set to a video file path to use a recording instead of the live drone
                            # e.g. VIDEO_SOURCE = "recordings/recording_20260414_120000.mp4"
-                           # When set: drone connection, flight, and laser are all skipped
+                           # When set: drone connection, flight, and lasezr are all skipped
 
 # ── Tracking config ───────────────────────────────────────────────────────────
 TRACKING_ENABLED      = False   # set to True to enable follow mode
@@ -70,8 +77,10 @@ TRACKING_COOLDOWN     = 1.5    # seconds between movement commands (IMPORTANT:
 class Metrics(object):
     """Collects and summarises pipeline performance metrics."""
 
-    def __init__(self):
+    def __init__(self, clip_id="", recognizer=""):
         self.session_start     = time.time()
+        self.clip_id           = clip_id
+        self.recognizer        = recognizer
         self.frames_processed  = 0
         self.frames_with_face  = 0
         self.detection_latencies   = []   # ms total per frame (all frames)
@@ -88,7 +97,8 @@ class Metrics(object):
         # Per-frame log: each entry is a dict written to the per-frame CSV at save time
         self._frame_log        = []
 
-    def record_frame(self, detection_latency_ms, had_detection, det_ms=0.0, recog_ms=0.0):
+    def record_frame(self, detection_latency_ms, had_detection,
+                     det_ms=0.0, recog_ms=0.0, labels=None):
         self.frames_processed += 1
         self._fps_frame_count += 1
         elapsed = time.time() - self.session_start
@@ -99,12 +109,15 @@ class Metrics(object):
             self.det_latencies.append(det_ms)
             self.recog_latencies.append(recog_ms)
         self._frame_log.append({
-            "frame":        self.frames_processed,
-            "elapsed_s":    round(elapsed, 3),
-            "total_ms":     round(detection_latency_ms, 2),
-            "det_ms":       round(det_ms, 2),
-            "recog_ms":     round(recog_ms, 2),
-            "had_face":     int(had_detection),
+            "frame":           self.frames_processed,
+            "clip_id":         self.clip_id,
+            "recognizer":      self.recognizer,
+            "elapsed_s":       round(elapsed, 3),
+            "total_ms":        round(detection_latency_ms, 2),
+            "det_ms":          round(det_ms, 2),
+            "recog_ms":        round(recog_ms, 2),
+            "had_face":        int(had_detection),
+            "predicted_label": ";".join(labels) if labels else "",
         })
 
         # Update FPS every second
@@ -207,7 +220,11 @@ class Metrics(object):
 
         # Write per-frame log (one row per frame, new file each session)
         if self._frame_log:
-            frame_path = path.replace(".csv", "_frames_%s.csv" % time.strftime("%Y%m%d_%H%M%S"))
+            # Use clip_id in the filename when running on a recorded clip;
+            # fall back to a timestamp only for live drone sessions.
+            suffix     = self.clip_id if self.clip_id else time.strftime("%Y%m%d_%H%M%S")
+            recog_part = self.recognizer.replace(" ", "_") if self.recognizer else "unknown"
+            frame_path = path.replace(".csv", "_frames_%s_%s.csv" % (recog_part, suffix))
             with open(frame_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(self._frame_log[0].keys()))
                 writer.writeheader()
@@ -218,7 +235,7 @@ class Metrics(object):
 # ── Alert helpers ─────────────────────────────────────────────────────────────
 
 # Path to your alert sound file -- change to your actual filename
-ALERT_SOUND = "redAlert.mp3"
+ALERT_SOUND = "assets/redAlert.mp3"
 pygame.mixer.music.load(ALERT_SOUND)
 
 def play_alert_sound():
@@ -421,7 +438,10 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
     result_queue : Queue           -- receives detection results from subprocess
     detect_proc  : Process         -- handle to the drone subprocess (for liveness check)
     """
-    metrics = Metrics()
+    metrics = Metrics(
+        clip_id=os.path.splitext(os.path.basename(VIDEO_SOURCE))[0] if VIDEO_SOURCE else "",
+        recognizer=RECOGNIZER_NAME,
+    )
 
     # State carried across frames (non-blocking queue reads return stale data)
     last_detection_dicts  = []      # list of {"label", "confidence", "bbox"} from worker
@@ -443,7 +463,7 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
             print("[MISSION] Video mode: %s -- no flight or laser. Press 'q' to quit." % VIDEO_SOURCE)
         elif FLIGHT_ENABLED and api is not None:
             api.single_fly_takeoff({'r':0,'g':255,'b':150,'mode':1})
-            api.single_fly_up(40)
+            api.single_fly_up(70)
             time.sleep(0.5)
             print("[MISSION] Airborne. Press 'q' in the video window to land.")
         else:
@@ -513,7 +533,8 @@ def run_drone_mission(api, frame_queue, result_queue, detect_proc):
                     pass
 
                 metrics.record_frame(last_proc_ms, bool(last_detection_dicts),
-                                     det_ms=last_det_ms, recog_ms=last_recog_ms)
+                                     det_ms=last_det_ms, recog_ms=last_recog_ms,
+                                     labels=[d["label"] for d in last_detection_dicts])
 
                 annotated_frame = draw_detections(frame.copy(), last_detection_dicts)
 
@@ -627,7 +648,7 @@ if __name__ == "__main__":
     # is slow (heavy model under constraints):
     #   frame_queue  maxsize=2  : main loop drops frames rather than queuing them
     #   result_queue maxsize=10 : worker can buffer a few results
-    from drone_detection_worker import run_detection_worker
+    from app.drone_detection_worker import run_detection_worker
 
     frame_queue  = multiprocessing.Queue(maxsize=1)   # depth=1 minimises detection lag
     result_queue = multiprocessing.Queue(maxsize=10)

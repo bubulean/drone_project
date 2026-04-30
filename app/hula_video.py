@@ -43,7 +43,7 @@ class hula_video(object):
             print("creating save directory")
             os.makedirs(self.savepath)
 
-        self.lib = ctypes.cdll.LoadLibrary("ffmpeg-lib.dll")
+        self.lib = ctypes.cdll.LoadLibrary("vendor/ffmpeg-lib.dll")
         self._setup_lib()
 
         self.videothread = threading.Thread(
